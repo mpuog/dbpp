@@ -1,70 +1,236 @@
 #pragma once
 
+// ODBC always available on windows
+// TODO implement or link to unixODBC  
+#ifdef WIN32
+#define DBPP_ODBC
+#endif
+
+
+#include <vector>
+#include <variant>
+#include <optional>
 #include <string>
+#include <memory>
+#include <ostream>
+#include <stdexcept>
+#include <deque>
 
-#include "dbpp/dbpp_export.hpp"
+// FIXME define export functions
+#define EXPORT
 
-/**
- * A note about the MSVC warning C4251:
- * This warning should be suppressed for private data members of the project's
- * exported classes, because there are too many ways to work around it and all
- * involve some kind of trade-off (increased code complexity requiring more
- * developer time, writing boilerplate code, longer compile times), but those
- * solutions are very situational and solve things in slightly different ways,
- * depending on the requirements of the project.
- * That is to say, there is no general solution.
- *
- * What can be done instead is understand where issues could arise where this
- * warning is spotting a legitimate bug. I will give the general description of
- * this warning's cause and break it down to make it trivial to understand.
- *
- * C4251 is emitted when an exported class has a non-static data member of a
- * non-exported class type.
- *
- * The exported class in our case is the class below (exported_class), which
- * has a non-static data member (m_name) of a non-exported class type
- * (std::string).
- *
- * The rationale here is that the user of the exported class could attempt to
- * access (directly, or via an inline member function) a static data member or
- * a non-inline member function of the data member, resulting in a linker
- * error.
- * Inline member function above means member functions that are defined (not
- * declared) in the class definition.
- *
- * Since this exported class never makes these non-exported types available to
- * the user, we can safely ignore this warning. It's fine if there are
- * non-exported class types as private member variables, because they are only
- * accessed by the members of the exported class itself.
- *
- * The name() method below returns a pointer to the stored null-terminated
- * string as a fundamental type (const char), so this is safe to use anywhere.
- * The only downside is that you can have dangling pointers if the pointer
- * outlives the class instance which stored the string.
- *
- * Shared libraries are not easy, they need some discipline to get right, but
- * they also solve some other problems that make them worth the time invested.
- */
+namespace dbpp {
+	/// Base module exception
+	class Error : public std::runtime_error
+	{
+	public:
+		explicit Error(std::string const& message) : std::runtime_error(message)
+		{}
+	};
 
-/**
- * @brief Reports the name of the library
- *
- * Please see the note above for considerations when creating shared libraries.
- */
-class DBPP_EXPORT exported_class
+	// TODO various special exceptions?
+
+	/// Various types of db
+	enum class db {
+		sqlite,
+#ifdef DBPP_ODBC
+		odbc,
+#endif // DBPP_ODBC
+		//mysql, postgress, etc.
+	};
+
+	/// Type NULL
+	class Null{}; 
+	/// NULL constant
+	const Null null; 
+
+	/// Type for string data
+	using String = std::string;  // string or utf8string???
+
+	/// Type for binary data
+	using Blob = std::vector<char>;
+
+	/// Result cell of SQL SELECT operation
+	/// @todo guid, date/time
+	using ResultCell = std::variant<Null, int, double, String, Blob>;
+
+	/// Result row of SQL SELECT operation (fetchone function)
+	using ResultRow = std::vector<ResultCell>;
+
+	/// Result tab of SQL SELECT operation (fetchmany/fetchall functions)
+	using ResultTab = std::vector<ResultRow> ;
+
+	/// Input datum for SQL INSERT/UPDATE operation. 
+	/// @todo guid, date/time
+	using InputCell = std::variant<Null, int, double, String, Blob>;
+
+	/// Input row for SQL INSERT/UPDATE operation (execute function)
+	using InputRow = std::vector<InputCell>;
+
+	/// Input tab for SQL INSERT/UPDATE operation (executemany function)
+	using InputTab = std::vector<InputRow> ;
+
+	/// Inner cursor interface
+	class BaseCursor;
+	/// Inner connection interface
+	class BaseConnection;
+
+	/// One column description
+	struct OneColumnInfo
+	{
+		String name;  ///< colunm nane
+		// TODO other fields according to PEP 249
+	};
+
+	/// Columns description
+	using ColumnsInfo = std::vector<OneColumnInfo>;
+
+	/// db cursor
+	class Cursor {
+		BaseCursor *cursor = nullptr;
+		friend class Connection;
+        ColumnsInfo columnsInfo;
+		int rowcount_ = -1;
+		unsigned arraysize_ = 1;
+
+		Cursor(std::shared_ptr<BaseConnection> connection_);
+
+	public:
+
+		Cursor() = delete;
+		Cursor(Cursor const&) = delete;
+		Cursor& operator = (Cursor const&) = delete;
+		~Cursor();
+
+        int rowcount() const {
+			return rowcount_; }
+		unsigned arraysize() const { 
+			return arraysize_; }
+		void arraysize(unsigned newsize) { 
+			arraysize_ = newsize; }
+		// TODO virtual void close() = 0;
+
+		/// Execute SQL with optional params
+		/// <param name="query">SQL query</param>
+		/// <param name="data">arary of params</param>
+		void EXPORT execute(String const& query, InputRow const& data = {});
+
+		ColumnsInfo const& description() const
+		{
+			return columnsInfo;
+		}
+
+		/// Execute SQL with set of params arrays
+		/// <param name="query">SQL query</param>
+		/// <param name="input_data">tab of params</param>
+		void EXPORT executemany(String const& query,
+			InputTab const& input_data);
+		//virtual void callproc(string_t const& proc_name) = 0; // ??
+
+		/// Get one row
+		/// @retval empty std::optional if no more rows
+		std::optional<dbpp::ResultRow> EXPORT fetchone();
+		/// Get all rows of sql result
+		ResultTab EXPORT fetchall();
+		/// Get some rows of sql result
+		ResultTab EXPORT fetchmany(int size=-1);
+
+        /// Put sql result to some receiver
+        template <class out_iterator>
+		unsigned fetchall(out_iterator oi)
+		{
+			unsigned n = 0;
+			while (auto row = fetchone())
+			{
+				*oi++ = row;
+				n++;
+			}
+			return n;
+		}
+
+        // TODO ? void setinputsizes(sizes)
+        // TODO ? void setoutputsize(size [, column]))
+	};
+
+	/// db connection
+	class Connection
+	{
+		//Cursor def_cursor; //  ??
+		std::shared_ptr<BaseConnection> connection;
+		Connection(BaseConnection *connection_);
+	public:
+		~Connection();
+		Connection(Connection const&) = delete;
+		Connection& operator = (Connection const&) = delete;
+		/// Create cursor
+		Cursor EXPORT cursor();
+		/// Get autocommit status
+		bool EXPORT autocommit();
+		/// Set autocommit status
+		void EXPORT autocommit(bool autocommitFlag);
+		/// Commit changes
+		void EXPORT commit();
+		/// Rollback changes
+		void EXPORT rollback();
+		// void close(); 
+    	// int threadsafety();  // global method in PEP 249
+	    // std::string paramstyle()  // global method in PEP 249
+
+		/// Create connection to db
+		/// @param type : kind of db (odbc, sqlite, etc.) 
+		/// @param connectString : Main db param. Name db for sqlite, connect string for ODBC, etc.
+		/// @param addParams : Addtitional params in syntax name1=value1;name2=value2,... 
+		///                    Similar to additional params in python's sqlite3.connect() function. 
+		///                    Params are specific for each db type and is absond for ODBC 
+		static Connection EXPORT connect(db type, std::string const& connectString, std::string const& addParams = "");
+	};  // class Connection
+
+    // =============== functions ======================
+
+    // inline float apilevel() { return 2.0; }
+
+	inline Connection connect(db type, std::string const& connectString, std::string const& addParams = "")
+	{
+		return Connection::connect(type, connectString, addParams);
+	}
+
+};  // namespace dbpp 
+
+
+/// Realization NULL's output
+inline std::ostream &operator << (
+	std::ostream& os, dbpp::Null const&)
 {
-public:
-  /**
-   * @brief Initializes the name field to the name of the project
-   */
-  exported_class();
+	return os << "NULL";
+}
 
-  /**
-   * @brief Returns a non-owning pointer to the string stored in this class
-   */
-  auto name() const -> const char*;
+/// Realization Blob's output
+std::ostream& EXPORT operator << (
+	std::ostream& os, dbpp::Blob const& blob);
 
-private:
-  DBPP_SUPPRESS_C4251
-  std::string m_name;
-};
+
+/// Simple realization cell's output
+inline std::ostream& operator << (
+	std::ostream& os, dbpp::ResultCell const& v)
+{
+	std::visit([&](auto&& arg) {os << arg ; }, v);
+	return os;
+}
+
+/// Simple realization row's output
+inline std::ostream& operator << (
+	std::ostream& os, dbpp::ResultRow const& row)
+{
+	for (const auto & x : row)
+		os << x << (&x == &row.back() ? "" : ", ");
+	return os;
+}
+
+/// Simple realization tab's output
+inline std::ostream& operator << (
+	std::ostream& os, dbpp::ResultTab const& tab)
+{
+	for (const auto& r : tab)
+		os << r << "\n";
+	return os;
+}

@@ -22,4 +22,6 @@ endfunction()
 
 add_example(empty_example)
 
+add_example(example1)
+
 add_folders(Example)

@@ -18,6 +18,9 @@ include(cmake/variables.cmake)
 add_library(
     dbpp_dbpp
     source/dbpp.cpp
+    source/odbc_db.cpp
+    source/sqlite_db.cpp
+    source/sqlite/sqlite3.c 
 )
 add_library(dbpp::dbpp ALIAS dbpp_dbpp)
 
